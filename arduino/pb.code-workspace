@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"name": "arduino",
+			"path": "./"
+		},
+		{
+			"name": "html",
+			"path": "../html"
+		}
+	],
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "html"
+	}
+}
