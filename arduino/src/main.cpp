@@ -17,7 +17,7 @@ WebSocketsServer webSocket(81);
 unsigned long total_time{0};
 unsigned long high_time{0};
 unsigned long low_time{0};
-int sensor_pin{3};
+constexpr int sensor_pin{3};
 
 // webpage
 const char* webpage {R"(
@@ -67,23 +67,41 @@ const char* webpage {R"(
 <head>
   <script src='https://cdn.plot.ly/plotly-latest.min.js'></script>
   <script>
-    var COUNT = 0;             // starting value
-    var SAMPLING_RATE = 1000;  // ms
-    var IS_PAUSED = true;      // paused flag
-    var IS_CONNECTED = false;  // connected flag
-    function update_connection() {
-      // collect the objects
-      svg = document.getElementById('plug_svg');
-      poly = document.getElementById('plug_poly');
-      points = poly.points;
-      // check the state
-      let delta = IS_CONNECTED ? 10 : -10;
-      // modify the poly
-      for (let p of points) {p.x += delta};
-      // modify the svg
-      svg.width += delta;
-      // toggle the state
-      IS_CONNECTED = !IS_CONNECTED;
+    var COUNT = 0;                       // starting value
+    var SAMPLING_RATE = 1000;            // ms
+    var IS_PAUSED = true;                // paused flag
+    var IS_CONNECTED = false;            // connection flag
+    // filter variables
+    var MICROS = 0;                        // microseconds
+    var POWER_OLD = 0;                     // last power value
+    var POWER_NEW = 0;                     // current power value
+    var POWER_PROPORTIONAL_CUTOFF = 1000;  // watts
+    var POWER_DERIVATIVE_CUTOFF = 100;     // dwatts/dt
+
+    function set_connection_state(state) {
+      if (state != IS_CONNECTED){
+        // collect the objects
+        svg = document.getElementById('plug_svg');
+        poly = document.getElementById('plug_poly');
+        points = poly.points;
+        // set the delta based on state
+        let delta = (state === true) ? -10 : 10;
+        // modify the poly
+        for (let p of points) {p.x += delta};
+        // modify the svg
+        svg.width += delta;
+        // update the state upon exit
+        IS_CONNECTED = state;
+      }
+    }
+
+    function micros2watts(micros) {
+      if (micros === 0) {
+        return 0;
+      }
+      else {
+        return 635891.991888686*Math.PI/micros + 34161356213001.9*Math.pow(Math.PI, 3)/Math.pow(micros, 3);
+      }
     }
   </script>
 </head>
@@ -114,6 +132,7 @@ const char* webpage {R"(
   </div>
   <div id='plot'>
   </div>
+
   <script>
     // =================== create plot the layout ===================
     let layout = {
@@ -124,9 +143,9 @@ const char* webpage {R"(
 
     // ==================== instantiate the plot =====================
     Plotly.newPlot(
-      'plot',                                  // div
-      [{x:[COUNT/60], y:[COUNT],               // data
-        mode: 'lines',}],                      // type
+      'plot',                    // div
+      [{x:[COUNT/60], y:[COUNT], // data
+        mode: 'lines',}],        // type
       layout,
       config,
     );
@@ -134,59 +153,64 @@ const char* webpage {R"(
     // ================= collect the nonlocal objects =================
     let watts = document.getElementById('watts');  // text object
     let timer = document.getElementById('timer');  // text object
-    let power = 0;  // y value on the plot
-    let time = 0;   // x value on the plot
-    const a = 199_844_880_469.07413 - 48_000_000_000.0;  // coeffs for power calcs
-    const b = -7_111_362.674411774 + 2_100_500.0;
-    const c = 68.65055109403046;
+    let POWER = 0;      // y value on the plot
+    let time = 0;       // x value on the plot
+
 
     // ================ file reader and event handlers ================
     let binary_reader = new FileReader();
     binary_reader.addEventListener('load', function(){
-      // reads the binary and sets the nonlocal power
-      // to the value read in from the reader, and increments the timer
-      let data = new Uint32Array(binary_reader.result);
-      if (data[0] !== 0){
-        let omega = 1/data[0];  // 1/micros
-        power = (a*(omega**2)) + (b*omega) + c;
+      // read in hte data
+      let data = new Uint32Array(binary_reader.result);  // read the binary
+      MICROS = Number(data);                             // convert to number
+      POWER_NEW = micros2watts(MICROS);                  // calculate power in watts
+      // apply the filter
+      if (POWER_NEW < POWER_PROPORTIONAL_CUTOFF) {                        // proportional check
+        if (Math.abs(POWER_NEW - POWER_OLD) < POWER_DERIVATIVE_CUTOFF) {  // derivative check
+          POWER = POWER_NEW;      // update the text
+          POWER_OLD = POWER_NEW;  // update power values
+          return;
+        }
       }
-      else {power = 0;}
-      time += SAMPLING_RATE/1000;
+      POWER = POWER_OLD;  // assign text to last valid power value
+      return;
     });
 
     // ================= websocket and event handlers =================
     let socket = new WebSocket('ws://' + location.hostname + ':81/', ['arduino']);
-    socket.onopen = function(event) {update_connection();}
-    socket.onerror = function(event) {update_connection();}
-    socket.onclose = function(event) {update_connection();}
-    // the on message function handles the responses
-    // from the arduino, and updates the plot accordingly
-    socket.onmessage = function(event) {
-      // read the blob
-      binary_reader.readAsArrayBuffer(event.data);
-      // update the text
-      watts.innerHTML = power;
-      timer.innerHTML = new Date(time * 1000).toISOString().substr(11, 8);
-      // update the plot
-      Plotly.extendTraces(      // update the plot
-        'plot',
-        {x: [[time/60]], y: [[power]],},
-        [0]
-      );
-    }
+
+    socket.onmessage = function(event) {binary_reader.readAsArrayBuffer(event.data);}
+    socket.onopen = function(event) {set_connection_state(true);}
+    socket.onerror = function(event) {set_connection_state(false);}
+    socket.onclose = function(event) {set_connection_state(false);}
 
     function loop() {
       // sends a single byte of data, the arduino returns the
       // time in micros from the infrared sensor
-      if (IS_CONNECTED && !IS_PAUSED) {socket.send('c')};
+      if (IS_CONNECTED  && !IS_PAUSED){
+        // set the text power and timer text
+        watts.innerHTML = Math.round(POWER);
+        timer.innerHTML = new Date(time * 1000).toISOString().substr(11, 8);
+
+        // update the time
+        time += SAMPLING_RATE/1000;
+
+        // update the plot
+        Plotly.extendTraces('plot', {x: [[time/60]], y: [[POWER]],}, [0]);
+
+        // set the default power value for the next interval
+        POWER = 0;
+
+        // send the signal to update the power sometime between now
+        // and the next time the loop function is called.
+        socket.send('c');
+      }
     }
 
     // run the loop
     setInterval(loop, SAMPLING_RATE);
   </script>
 </body>
-
-
 )"};
 
 // websocket function
@@ -197,9 +221,11 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         }
         case WStype_TEXT:{
               String _payload = String((char *) &payload[0]);
+              // print the recieved messag
               Serial.println(_payload);
-              // send data back to server
+              // print the datat to send
               Serial.println(total_time);
+              // send the data
               webSocket.sendBIN(num, (uint8_t *) &total_time, sizeof(total_time));
               break;
         }
@@ -212,7 +238,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     }
 }
 
-
+// setup func
 void setup(){
     // start the coms
     Serial.begin(115200);
@@ -251,10 +277,12 @@ void setup(){
 
 // loop func
 void loop(){
-    webSocket.loop();
-    server.handleClient();
-    MDNS.update();
-    high_time = pulseIn(sensor_pin, HIGH, 450000);
-    low_time = pulseIn(sensor_pin, LOW, 450000);
-    total_time = high_time + low_time;
+  // handle the servers
+  webSocket.loop();
+  server.handleClient();
+  MDNS.update();
+  // update the total time
+  high_time = pulseIn(sensor_pin, HIGH, 1000000);
+  low_time = pulseIn(sensor_pin, LOW, 1000000);
+  total_time = high_time + low_time;
 }

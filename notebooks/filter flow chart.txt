@@ -1,0 +1,13 @@
+signal>
+	is it within the proportional bounds && dervative bounds? 
+		y:
+			calculate power
+			reassign micros-old
+		n: 
+			is the last micros != 0?
+				y:
+					assign to the last valid power number
+				n: 
+					do nothing, power will stay at zero
+				
+	
